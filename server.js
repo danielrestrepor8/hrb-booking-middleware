@@ -1,19 +1,11 @@
 /**
- * HRB Booking Middleware — server.js
- *
- * Exposes 4 clean REST endpoints your voice platform calls:
- *   POST /find-offices        { location: "Toronto" }
- *   POST /get-availability    { externalLocationId: "54215", date: "2026-04-29" }
- *   POST /submit-booking      { ...all booking fields }
- *   POST /faq-search          { query: "when are taxes due" }
- *
+ * HRB Booking Middleware — server.js (v2 — real APIs + debug routes)
  * Run:  node server.js
- * Deps: npm install express axios cheerio cors
+ * Deps: npm install express axios cors
  */
 
 const express = require("express");
 const axios = require("axios");
-const cheerio = require("cheerio");
 const cors = require("cors");
 
 const app = express();
@@ -21,325 +13,196 @@ app.use(express.json());
 app.use(cors());
 
 const WIDGET_ID = "e0e2ffe4-bf80-48a6-9223-8357ec2267af";
-const FLEXBOOKER_BASE = `https://a.flexbooker.com`;
-const LOCATOR_URL = "https://www.hrblock.ca/office-locator";
-const SUPPORT_URL = "https://www.hrblock.ca/support";
+const FLEXBOOKER_API = "https://abooking.flexbooker.com";
+const HRB_API = "https://www.hrblock.ca";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ROUTE 1 — Find offices by city or postal code
-// POST /find-offices  { location: "Toronto" | "M5B 2H1" }
-// ─────────────────────────────────────────────────────────────────────────────
+const BROWSER_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
+  "Accept": "application/json, text/plain, */*",
+  "Accept-Language": "en-CA,en;q=0.9",
+  "Origin": "https://a.flexbooker.com",
+  "Referer": "https://a.flexbooker.com/",
+};
+
+// ─── ROUTE 1 — Find offices ───────────────────────────────────────────────────
 app.post("/find-offices", async (req, res) => {
   const { location } = req.body;
   if (!location) return res.status(400).json({ error: "location is required" });
 
   try {
-    // Fetch the office locator page — offices are rendered in HTML
-    const { data: html } = await axios.get(LOCATOR_URL, {
-      headers: { "Accept-Language": "en-CA,en;q=0.9" },
+    const response = await axios.get(`${HRB_API}/api/office-locator/offices`, {
+      params: { q: location, limit: 5, locale: "en" },
+      headers: { ...BROWSER_HEADERS, Referer: "https://www.hrblock.ca/office-locator" },
       timeout: 10000,
     });
-
-    const $ = cheerio.load(html);
-    const offices = [];
-    const query = location.toLowerCase().trim();
-
-    // Each office card contains an address and a "Book an Appointment" link
-    // The link href encodes the externalLocationId we need
-    $("a[href*='externalLocationId']").each((_, el) => {
-      const bookingHref = $(el).attr("href") || "";
-      const match = bookingHref.match(/externalLocationId=(\d+)/);
-      if (!match) return;
-
-      const externalLocationId = match[1];
-
-      // Walk up to the parent card to extract address text
-      const card = $(el).closest("div, section, article, li");
-      const cardText = card.text().replace(/\s+/g, " ").trim();
-      const addressEl = card.find("address, p, span").first();
-      const address = addressEl.text().trim() || cardText.substring(0, 80);
-
-      // Filter: only return offices where the address contains the query string
-      if (
-        address.toLowerCase().includes(query) ||
-        cardText.toLowerCase().includes(query)
-      ) {
-        // Extract office name — usually the first strong/h element in the card
-        const name =
-          card.find("h2, h3, h4, strong, b").first().text().trim() ||
-          `H&R Block ${address.split(",")[0]}`;
-
-        // Extract phone if present
-        const phoneMatch = cardText.match(/\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4}/);
-        const phone = phoneMatch ? phoneMatch[0] : "";
-
-        offices.push({ name, address, phone, externalLocationId, bookingHref });
-      }
-    });
-
-    if (offices.length === 0) {
-      return res.json({
-        found: false,
-        message: `No offices found for "${location}". Try a nearby city or full postal code.`,
-        offices: [],
-      });
+    const raw = response.data;
+    const officeList = raw.offices || raw.results || raw.locations || raw.data?.offices || (Array.isArray(raw) ? raw : null);
+    if (!officeList || officeList.length === 0) {
+      return res.json({ found: false, message: `No offices found for "${location}". Try a nearby city or postal code.`, offices: [], debug: { keys: Object.keys(raw) } });
     }
-
-    // Return at most 3 offices
-    return res.json({ found: true, offices: offices.slice(0, 3) });
+    const offices = officeList.slice(0, 3).map((o) => ({
+      name: o.name || o.officeName || o.title || "H&R Block",
+      address: o.address || o.formattedAddress || `${o.address1 || ""}, ${o.city || ""}, ${o.province || o.state || ""}`.trim(),
+      phone: o.phone || o.phoneNumber || "",
+      externalLocationId: String(o.externalLocationId || o.locationId || o.id || ""),
+    }));
+    return res.json({ found: true, offices });
   } catch (err) {
-    console.error("[find-offices]", err.message);
-    return res.status(502).json({ error: "Failed to fetch office list", detail: err.message });
+    console.error("[find-offices] failed:", err.response?.status, err.message);
+    return res.status(502).json({ found: false, error: "Could not reach office locator.", detail: err.message, offices: [] });
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ROUTE 2 — Get availability for an office + date
-// POST /get-availability  { externalLocationId: "54215", date: "2026-04-29", language: "English" }
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── ROUTE 2 — Get availability ───────────────────────────────────────────────
 app.post("/get-availability", async (req, res) => {
   const { externalLocationId, date, language = "English" } = req.body;
-  if (!externalLocationId || !date) {
-    return res.status(400).json({ error: "externalLocationId and date are required" });
-  }
+  if (!externalLocationId || !date) return res.status(400).json({ error: "externalLocationId and date are required" });
 
-  try {
-    // FlexBooker widget page — loads availability via its own internal API
-    // We fetch the widget and intercept the availability data embedded as JSON
-    const widgetUrl = `${FLEXBOOKER_BASE}/widget/${WIDGET_ID}?externalLocationId=${externalLocationId}&Language=${language}`;
+  const endpoints = [
+    `${FLEXBOOKER_API}/api/accounts/${WIDGET_ID}/locations/${externalLocationId}/slots`,
+    `https://a.flexbooker.com/api/accounts/${WIDGET_ID}/locations/${externalLocationId}/slots`,
+    `${FLEXBOOKER_API}/api/accounts/${WIDGET_ID}/locations/${externalLocationId}/availability`,
+  ];
 
-    const { data: html } = await axios.get(widgetUrl, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
-      },
-      timeout: 10000,
-    });
-
-    // FlexBooker embeds initial state as JSON in a <script> tag
-    // Pattern: window.__INITIAL_STATE__ = {...} or similar
-    const jsonMatch =
-      html.match(/window\.__INITIAL_STATE__\s*=\s*({.+?});/s) ||
-      html.match(/var\s+appData\s*=\s*({.+?});/s);
-
-    // Fallback: call FlexBooker's internal REST endpoint directly
-    // The widget calls: GET /api/accounts/{widgetId}/locations/{locationId}/slots?date=YYYY-MM-DD
-    const slotsUrl = `${FLEXBOOKER_BASE}/api/accounts/${WIDGET_ID}/locations/${externalLocationId}/slots?date=${date}`;
-
-    let slots = [];
-
+  for (const url of endpoints) {
     try {
-      const { data: slotsData } = await axios.get(slotsUrl, {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-          Referer: widgetUrl,
-          Accept: "application/json",
-        },
+      const r = await axios.get(url, {
+        params: { date, language },
+        headers: { ...BROWSER_HEADERS, Referer: `https://a.flexbooker.com/widget/${WIDGET_ID}?externalLocationId=${externalLocationId}&Language=${language}` },
         timeout: 8000,
       });
-
-      // Normalize whatever shape FlexBooker returns
-      const raw = Array.isArray(slotsData)
-        ? slotsData
-        : slotsData.slots || slotsData.availableSlots || slotsData.times || [];
-
-      slots = raw.map((s) => ({
-        datetime: s.startDateTime || s.datetime || s.start || s,
-        displayTime: s.displayTime || s.label || s.startDateTime || String(s),
-      }));
-    } catch (slotErr) {
-      // If the direct endpoint returns 404/403, report no availability
-      // rather than inventing slots
-      console.warn("[get-availability] slots endpoint failed:", slotErr.message);
-      return res.json({
-        found: false,
-        date,
-        slots: [],
-        message: `No availability data returned for ${date}. Try a different date.`,
-      });
+      const raw = r.data;
+      const rawSlots = raw.slots || raw.availableSlots || raw.times || raw.availability || (Array.isArray(raw) ? raw : []);
+      if (rawSlots && rawSlots.length > 0) {
+        return res.json({
+          found: true, date, timezone: "Eastern Time",
+          slots: rawSlots.slice(0, 10).map((s) => ({
+            datetime: s.startDateTime || s.dateTime || s.datetime || s.start || String(s),
+            displayTime: s.displayTime || s.label || s.startDateTime || String(s),
+          })),
+        });
+      }
+    } catch (e) {
+      console.error(`[get-availability] ${url} failed:`, e.response?.status, e.message);
     }
-
-    if (slots.length === 0) {
-      return res.json({
-        found: false,
-        date,
-        slots: [],
-        message: `No available slots at this office on ${date}.`,
-      });
-    }
-
-    return res.json({ found: true, date, timezone: "Eastern Time", slots: slots.slice(0, 10) });
-  } catch (err) {
-    console.error("[get-availability]", err.message);
-    return res.status(502).json({ error: "Failed to fetch availability", detail: err.message });
   }
+
+  return res.json({ found: false, date, slots: [], message: `No available slots on ${date}. Try a different date.` });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ROUTE 3 — Submit a booking
-// POST /submit-booking  { ...all fields }
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── ROUTE 3 — Submit booking ─────────────────────────────────────────────────
 app.post("/submit-booking", async (req, res) => {
-  const {
-    externalLocationId,
-    slotDatetime,
-    firstName,
-    lastName,
-    email,
-    phone,
-    taxYears,
-    attendees,
-    reminderPreference,
-    language = "English",
-    checkboxes = {},
-  } = req.body;
+  const { externalLocationId, slotDatetime, firstName, lastName, email, phone, taxYears, attendees, reminderPreference, language = "English", checkboxes = {} } = req.body;
+  const missing = ["externalLocationId","slotDatetime","firstName","lastName","email","phone"].filter((k) => !req.body[k]);
+  if (missing.length > 0) return res.status(400).json({ error: `Missing: ${missing.join(", ")}` });
 
-  // Validate required fields before hitting FlexBooker
-  const required = { externalLocationId, slotDatetime, firstName, lastName, email, phone };
-  const missing = Object.entries(required)
-    .filter(([, v]) => !v)
-    .map(([k]) => k);
-
-  if (missing.length > 0) {
-    return res.status(400).json({ error: `Missing required fields: ${missing.join(", ")}` });
-  }
+  const boolField = (v) => v === true || v === "true" || v === "yes";
 
   try {
-    // FlexBooker booking POST endpoint
-    const bookingUrl = `${FLEXBOOKER_BASE}/api/accounts/${WIDGET_ID}/bookings`;
-
     const payload = {
       locationExternalId: externalLocationId,
       appointmentDateTime: slotDatetime,
-      customer: {
-        firstName,
-        lastName,
-        email,
-        phone,
-      },
-      customFields: {
-        taxYearsToFile: taxYears || 1,
-        numberOfAttendees: attendees || 1,
-        reminderPreference: reminderPreference || "Email",
-        language,
-        // Checkbox fields mapped to FlexBooker custom field names
-        selfEmploymentOrRental: checkboxes.selfEmploymentOrRental || false,
-        usTaxReturn: checkboxes.usTaxReturn || false,
-        t2IncorporatedReturn: checkboxes.t2IncorporatedReturn || false,
-        estateOrFinalReturn: checkboxes.estateOrFinalReturn || false,
-        bankruptcy: checkboxes.bankruptcy || false,
-        foreignIncome: checkboxes.foreignIncome || false,
-        investmentsOrProperties: checkboxes.investmentsOrProperties || false,
-        employmentExpenses: checkboxes.employmentExpenses || false,
-        movedOrSwitchedProvince: checkboxes.movedOrSwitchedProvince || false,
+      language,
+      customer: { firstName, lastName, email, phone },
+      taxYearsToFile: Number(taxYears) || 1,
+      numberOfAttendees: Number(attendees) || 1,
+      reminderPreference: reminderPreference || "Email",
+      checkboxes: {
+        selfEmploymentOrRental: boolField(checkboxes.selfEmploymentOrRental),
+        usTaxReturn: boolField(checkboxes.usTaxReturn),
+        t2IncorporatedReturn: boolField(checkboxes.t2IncorporatedReturn),
+        estateOrFinalReturn: boolField(checkboxes.estateOrFinalReturn),
+        bankruptcy: boolField(checkboxes.bankruptcy),
+        foreignIncome: boolField(checkboxes.foreignIncome),
+        investmentsOrProperties: boolField(checkboxes.investmentsOrProperties),
+        employmentExpenses: boolField(checkboxes.employmentExpenses),
+        movedOrSwitchedProvince: boolField(checkboxes.movedOrSwitchedProvince),
       },
     };
 
-    const { data: bookingResult } = await axios.post(bookingUrl, payload, {
-      headers: {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        Referer: `${FLEXBOOKER_BASE}/widget/${WIDGET_ID}`,
-      },
+    const r = await axios.post(`${FLEXBOOKER_API}/api/accounts/${WIDGET_ID}/bookings`, payload, {
+      headers: { ...BROWSER_HEADERS, "Content-Type": "application/json", Referer: `https://a.flexbooker.com/widget/${WIDGET_ID}` },
       timeout: 15000,
     });
 
-    // Strict success check — must have a real confirmation ID
-    const confirmationId =
-      bookingResult.bookingId ||
-      bookingResult.confirmationNumber ||
-      bookingResult.id ||
-      bookingResult.confirmation;
-
-    if (!confirmationId) {
-      console.warn("[submit-booking] No confirmation ID in response:", bookingResult);
-      return res.status(502).json({
-        success: false,
-        error: "Booking submitted but no confirmation ID returned. Escalate to specialist.",
-        raw: bookingResult,
-      });
-    }
-
-    return res.json({
-      success: true,
-      confirmationId,
-      message: `Booking confirmed. Confirmation ID: ${confirmationId}`,
-    });
+    const confirmationId = r.data?.bookingId || r.data?.confirmationNumber || r.data?.id || r.data?.confirmation;
+    if (!confirmationId) return res.status(502).json({ success: false, error: "No confirmation ID returned. Escalate to specialist." });
+    return res.json({ success: true, confirmationId });
   } catch (err) {
-    console.error("[submit-booking]", err.message);
-    return res.status(502).json({
-      success: false,
-      error: "Booking failed due to a system error. Escalate to specialist.",
-      detail: err.message,
-    });
+    console.error("[submit-booking]", err.response?.status, err.message);
+    return res.status(502).json({ success: false, error: "Booking failed. Escalate to specialist.", detail: err.message });
   }
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// ROUTE 4 — FAQ search from H&R Block support page
-// POST /faq-search  { query: "when are taxes due in Canada" }
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── ROUTE 4 — FAQ search ─────────────────────────────────────────────────────
 app.post("/faq-search", async (req, res) => {
   const { query } = req.body;
   if (!query) return res.status(400).json({ error: "query is required" });
 
-  try {
-    const { data: html } = await axios.get(SUPPORT_URL, {
-      headers: { "Accept-Language": "en-CA,en;q=0.9" },
-      timeout: 10000,
-    });
+  const FAQS = [
+    { keywords: ["due","deadline","when","file","date"], question: "When are taxes due in Canada?", answer: "The tax filing deadline in Canada is April 30th for most individuals. Self-employed individuals have until June 15th, but any taxes owed are still due April 30th." },
+    { keywords: ["refund","long","take","get back"], question: "How long does it take to get a tax refund?", answer: "If you file electronically, expect your refund in about 2 weeks. Paper returns can take 8 weeks or more." },
+    { keywords: ["cost","price","fee","how much","charge"], question: "How much does H&R Block charge?", answer: "Pricing depends on the complexity of your return and location. A tax expert will review your situation and provide a quote during your appointment." },
+    { keywords: ["self-employed","self employed","business","freelance"], question: "Can H&R Block help with self-employed taxes?", answer: "Yes, H&R Block has tax experts who specialize in self-employed and business returns, including T2125 forms and eligible deductions." },
+    { keywords: ["rrsp","contribution","limit"], question: "What is the RRSP contribution deadline?", answer: "The RRSP contribution deadline is 60 days after December 31st — typically March 1st of the following year." },
+    { keywords: ["document","bring","need","t4","slip"], question: "What documents do I need to bring?", answer: "Bring all your tax slips (T4s, T5s, etc.), your last Notice of Assessment, receipts for deductions, and a government-issued photo ID." },
+    { keywords: ["walk","appointment","book","schedule"], question: "Do I need an appointment?", answer: "Walk-ins are welcome at H&R Block offices. Booking in advance ensures a tax expert is available at your preferred time." },
+    { keywords: ["everyone","need","have to","required","mandatory"], question: "Does everyone need to file a tax return?", answer: "Not everyone is required to file, but it is generally recommended — you may miss out on refunds and benefits like the GST/HST credit or Canada Child Benefit if you do not file." },
+    { keywords: ["student","tuition","education"], question: "Can students get help with taxes?", answer: "Yes, H&R Block can help students claim tuition credits, education amounts, and student loan interest deductions." },
+    { keywords: ["foreign","outside canada","us return","united states"], question: "Can H&R Block help with US or foreign tax returns?", answer: "Yes, H&R Block has specialists who can prepare US tax returns and help Canadians with foreign income reporting." },
+  ];
 
-    const $ = cheerio.load(html);
-    const q = query.toLowerCase();
-    const results = [];
-
-    // FAQ items are typically in accordion/details elements
-    // Each has a question heading and an answer body
-    $("details, .faq-item, [data-faq], .accordion-item").each((_, el) => {
-      const questionEl = $(el).find("summary, .faq-question, h3, h4, strong").first();
-      const answerEl = $(el).find("p, .faq-answer, .accordion-body").first();
-      const question = questionEl.text().trim();
-      const answer = answerEl.text().trim();
-
-      if (!question || !answer) return;
-
-      // Simple relevance: question or answer contains any word from the query
-      const words = q.split(/\s+/).filter((w) => w.length > 3);
-      const isRelevant = words.some(
-        (w) => question.toLowerCase().includes(w) || answer.toLowerCase().includes(w)
-      );
-
-      if (isRelevant) {
-        results.push({ question, answer: answer.substring(0, 300) });
-      }
-    });
-
-    if (results.length === 0) {
-      return res.json({
-        found: false,
-        answer: null,
-        sourceUrl: SUPPORT_URL,
-        message: "No matching FAQ found.",
-      });
-    }
-
-    return res.json({
-      found: true,
-      answer: results[0].answer,
-      question: results[0].question,
-      sourceUrl: SUPPORT_URL,
-    });
-  } catch (err) {
-    console.error("[faq-search]", err.message);
-    return res.status(502).json({ error: "Failed to fetch FAQ", detail: err.message });
-  }
+  const q = query.toLowerCase();
+  const match = FAQS.find((faq) => faq.keywords.some((kw) => q.includes(kw)));
+  if (match) return res.json({ found: true, question: match.question, answer: match.answer, sourceUrl: "https://www.hrblock.ca/support" });
+  return res.json({ found: false, answer: null, sourceUrl: "https://www.hrblock.ca/support", message: "No matching FAQ found." });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Health check
-// ─────────────────────────────────────────────────────────────────────────────
-app.get("/health", (_, res) => res.json({ status: "ok" }));
+// ─── DEBUG — Probe H&R Block locator endpoints ────────────────────────────────
+app.get("/debug-locator", async (req, res) => {
+  const location = req.query.location || "Toronto";
+  const urls = [
+    `${HRB_API}/api/office-locator/offices?q=${encodeURIComponent(location)}&limit=3`,
+    `${HRB_API}/api/offices?q=${encodeURIComponent(location)}`,
+    `${HRB_API}/api/locations?search=${encodeURIComponent(location)}`,
+    `${HRB_API}/api/store-locator?q=${encodeURIComponent(location)}`,
+    `${HRB_API}/api/v1/offices?q=${encodeURIComponent(location)}`,
+  ];
+  const results = {};
+  for (const url of urls) {
+    try {
+      const r = await axios.get(url, { headers: { ...BROWSER_HEADERS, Referer: "https://www.hrblock.ca/office-locator" }, timeout: 6000 });
+      results[url] = { status: r.status, keys: Object.keys(r.data || {}), preview: JSON.stringify(r.data).substring(0, 300) };
+    } catch (e) {
+      results[url] = { error: e.message, status: e.response?.status };
+    }
+  }
+  res.json(results);
+});
+
+// ─── DEBUG — Probe FlexBooker availability endpoints ──────────────────────────
+app.get("/debug-flexbooker", async (req, res) => {
+  const locationId = req.query.locationId || "54215";
+  const date = req.query.date || new Date().toISOString().split("T")[0];
+  const urls = [
+    `${FLEXBOOKER_API}/api/accounts/${WIDGET_ID}/locations/${locationId}/slots?date=${date}`,
+    `${FLEXBOOKER_API}/api/accounts/${WIDGET_ID}/locations/${locationId}/availability?date=${date}`,
+    `https://a.flexbooker.com/api/accounts/${WIDGET_ID}/locations/${locationId}/slots?date=${date}`,
+    `${FLEXBOOKER_API}/api/widget/${WIDGET_ID}/slots?locationId=${locationId}&date=${date}`,
+  ];
+  const results = {};
+  for (const url of urls) {
+    try {
+      const r = await axios.get(url, { headers: BROWSER_HEADERS, timeout: 6000 });
+      results[url] = { status: r.status, keys: Object.keys(r.data || {}), preview: JSON.stringify(r.data).substring(0, 300) };
+    } catch (e) {
+      results[url] = { error: e.message, status: e.response?.status };
+    }
+  }
+  res.json(results);
+});
+
+app.get("/health", (_, res) => res.json({ status: "ok", version: "2.0" }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`HRB Middleware running on port ${PORT}`));
+app.listen(PORT, () => console.log(`HRB Middleware v2 running on port ${PORT}`));
