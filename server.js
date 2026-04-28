@@ -112,23 +112,36 @@ app.post("/find-offices", async (req, res) => {
 app.post("/get-availability", async (req, res) => {
   const { locationId, externalLocationId, date, serviceId = SERVICE_ID } = req.body;
 
-  // Normalize date — handle YYYY-MM-DD, M/D/YYYY, natural language, or missing
+  // Normalize date — handle any format, fall back to today+1 if unparseable
   let useDate = todayDate();
   if (date) {
-    // Try YYYY-MM-DD
-    if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-      useDate = date;
-    // Try M/D/YYYY or MM/DD/YYYY
-    } else if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(date)) {
-      const [m, d, y] = date.split("/");
-      useDate = `${y}-${m.padStart(2,"0")}-${d.padStart(2,"0")}`;
-    // Try to parse natural language via Date
+    const d = String(date).trim();
+    // YYYY-MM-DD
+    if (/^\d{4}-\d{2}-\d{2}$/.test(d)) {
+      useDate = d;
+    // M/D/YYYY or MM/DD/YYYY
+    } else if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(d)) {
+      const [m, day, y] = d.split("/");
+      useDate = `${y}-${m.padStart(2,"0")}-${day.padStart(2,"0")}`;
+    // "May 5" or "May 5th" or "the 5th" — extract month + day number
     } else {
-      const parsed = new Date(date);
-      if (!isNaN(parsed)) {
-        useDate = parsed.toISOString().split("T")[0];
+      const months = { jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12 };
+      const lower = d.toLowerCase().replace(/[^a-z0-9 ]/g, " ");
+      const numMatch = lower.match(/(\d{1,2})/);
+      const monMatch = lower.match(/(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/);
+      if (numMatch) {
+        const day = parseInt(numMatch[1]);
+        const now = new Date();
+        const month = monMatch ? months[monMatch[1]] : now.getMonth() + 1;
+        let year = now.getFullYear();
+        // If the date has passed this year, use next year
+        const candidate = new Date(year, month - 1, day);
+        if (candidate < now) year++;
+        useDate = `${year}-${String(month).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
+      } else {
+        // Absolute fallback: next week
+        useDate = addDays(todayDate(), 7);
       }
-      // else fall back to today
     }
   }
 
@@ -486,7 +499,7 @@ app.post("/debug-booking", async (req, res) => {
   res.json({ results });
 });
 
-app.get("/health", (_, res) => res.json({ status: "ok", version: "6.7" }));
+app.get("/health", (_, res) => res.json({ status: "ok", version: "6.8" }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`HRB Middleware v6 running on port ${PORT}`));
