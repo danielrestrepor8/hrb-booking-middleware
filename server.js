@@ -317,21 +317,40 @@ app.post("/submit-booking", async (req, res) => {
       WidgetGuid: WIDGET_ID,
     };
 
-    const r = await axios.post(
-      `${FB_BASE}/api/scheduleBooking?merchantGuid=${MERCHANT_GUID}`,
-      new URLSearchParams(Object.entries(schedulePayload).map(([k,v]) => [k, String(v)])),
-      {
-        headers: {
-          ...BROWSER_HEADERS,
-          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-          "X-Requested-With": "XMLHttpRequest",
-        },
-        timeout: 15000,
-      }
-    );
-    confirmationId = r.data?.Id || r.data?.id || r.data?.BookingId ||
-      r.data?.bookingId || r.data?.ConfirmationNumber || r.data?.confirmationNumber;
-    console.log("[submit-booking] scheduleBooking response:", r.status, JSON.stringify(r.data));
+    let rawResponse = null;
+    try {
+      const r = await axios.post(
+        `${FB_BASE}/api/scheduleBooking?merchantGuid=${MERCHANT_GUID}`,
+        new URLSearchParams(Object.entries(schedulePayload).map(([k,v]) => [k, String(v)])),
+        {
+          headers: {
+            ...BROWSER_HEADERS,
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "X-Requested-With": "XMLHttpRequest",
+          },
+          timeout: 15000,
+        }
+      );
+      rawResponse = r.data;
+      console.log("[submit-booking] status:", r.status, "data:", JSON.stringify(r.data));
+      confirmationId = r.data?.Id || r.data?.id || r.data?.BookingId ||
+        r.data?.bookingId || r.data?.ConfirmationNumber || r.data?.confirmationNumber ||
+        r.data?.AppointmentId || r.data?.appointmentId || r.data?.scheduleId ||
+        r.data?.ScheduleId || r.data?.confirmation;
+    } catch (bookingErr) {
+      console.error("[submit-booking] error:", bookingErr.response?.status, JSON.stringify(bookingErr.response?.data));
+      rawResponse = bookingErr.response?.data;
+      // If error response contains an ID, it may still have booked
+      confirmationId = bookingErr.response?.data?.Id || bookingErr.response?.data?.id;
+    }
+    // If no ID found, return raw response for debugging
+    if (!confirmationId) {
+      return res.status(502).json({
+        success: false, confirmationId: "",
+        errorMessage: "Booking could not be confirmed. Please call the office directly.",
+        debug: rawResponse,
+      });
+    }
 
     if (!confirmationId) {
       return res.status(502).json({
@@ -448,7 +467,7 @@ app.post("/debug-booking", async (req, res) => {
   res.json({ results });
 });
 
-app.get("/health", (_, res) => res.json({ status: "ok", version: "6.4" }));
+app.get("/health", (_, res) => res.json({ status: "ok", version: "6.5" }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`HRB Middleware v6 running on port ${PORT}`));
