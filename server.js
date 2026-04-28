@@ -112,7 +112,26 @@ app.post("/find-offices", async (req, res) => {
 app.post("/get-availability", async (req, res) => {
   const { locationId, externalLocationId, date, serviceId = SERVICE_ID } = req.body;
 
-  const useDate = date || todayDate();
+  // Normalize date — handle YYYY-MM-DD, M/D/YYYY, natural language, or missing
+  let useDate = todayDate();
+  if (date) {
+    // Try YYYY-MM-DD
+    if (/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      useDate = date;
+    // Try M/D/YYYY or MM/DD/YYYY
+    } else if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(date)) {
+      const [m, d, y] = date.split("/");
+      useDate = `${y}-${m.padStart(2,"0")}-${d.padStart(2,"0")}`;
+    // Try to parse natural language via Date
+    } else {
+      const parsed = new Date(date);
+      if (!isNaN(parsed)) {
+        useDate = parsed.toISOString().split("T")[0];
+      }
+      // else fall back to today
+    }
+  }
+
   const locId = locationId || externalLocationId;
   if (!locId) return res.status(400).json({ error: "locationId or externalLocationId is required" });
 
@@ -467,7 +486,7 @@ app.post("/debug-booking", async (req, res) => {
   res.json({ results });
 });
 
-app.get("/health", (_, res) => res.json({ status: "ok", version: "6.6" }));
+app.get("/health", (_, res) => res.json({ status: "ok", version: "6.7" }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`HRB Middleware v6 running on port ${PORT}`));
