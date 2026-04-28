@@ -74,9 +74,17 @@ app.post("/find-offices", async (req, res) => {
 
   const o = (i) => list[i] || {};
 
+  // Pre-built spoken response for ix Hello {Message} template variable
+  const spokenMessage = list.length > 0
+    ? `I found ${list.length} offices near you. Option 1: ${o(0).name} at ${o(0).address}, phone ${o(0).phone}. Option 2: ${o(1).name || "not available"} at ${o(1).address || ""}. Option 3: ${o(2).name || "not available"} at ${o(2).address || ""}. Which office would you prefer — 1, 2, or 3?`
+    : `I wasn't able to find any H&R Block offices near that location. Could you try a nearby city or postal code?`;
+
   return res.json({
     found: list.length > 0,
     totalFound: list.length,
+    // Pre-built message — use {Message} in ix Hello Valid Result Template
+    Message: spokenMessage,
+    message: spokenMessage,
     // Flat fields for ix Hello templates
     office1Name: o(0).name || "",
     office1Address: o(0).address || "",
@@ -157,6 +165,9 @@ app.post("/get-availability", async (req, res) => {
     const s = (i) => daySlots[i] || {};
     const fmt = (i) => s(i).Time ? `${s(i).DateTime} ${s(i).Time}` : "";
 
+    const slotsMsg = [0,1,2,3,4].map((i) => s(i).Time ? `Option ${i+1}: ${s(i).Time} on ${s(i).DateTime}` : "").filter(Boolean).join(". ");
+    const availMsg = `Here are available times. All times are Mountain Time. ${slotsMsg}. Which time works for you?`;
+
     return res.json({
       found: true,
       date: useDate,
@@ -164,6 +175,9 @@ app.post("/get-availability", async (req, res) => {
       availableDatesText: availDates.slice(0, 5).join(", "),
       timezone: "Mountain Time",
       totalSlots: daySlots.length,
+      // Pre-built message — use {Message} in ix Hello Valid Result Template
+      Message: availMsg,
+      message: availMsg,
       // Flat slot fields
       slot1Time: s(0).Time || "",
       slot1Date: s(0).DateTime || "",
@@ -308,11 +322,14 @@ app.post("/submit-booking", async (req, res) => {
       });
     }
 
+    const summary = `Booking confirmed. Your confirmation number is ${confirmationId}. A reminder will be sent to ${email}.`;
     return res.json({
       success: true,
       confirmationId: String(confirmationId),
       errorMessage: "",
-      summaryText: `Booking confirmed. Your confirmation number is ${confirmationId}. A reminder will be sent to ${email}.`,
+      summaryText: summary,
+      Message: summary,
+      message: summary,
     });
   } catch (err) {
     console.error("[submit-booking]", err.response?.status, err.message);
@@ -346,11 +363,15 @@ app.post("/faq-search", async (req, res) => {
   const q = query.toLowerCase();
   const match = FAQS.find((faq) => faq.keywords.some((kw) => q.includes(kw)));
 
+  const answerText = match?.answer || "For accurate information please visit hrblock.ca/support or speak with a tax specialist.";
+  const faqMsg = `${answerText} Would you also like to book an appointment?`;
   return res.json({
     found: !!match,
     question: match?.question || "",
-    answer: match?.answer || "For accurate information please visit hrblock.ca/support or speak with a tax specialist.",
+    answer: answerText,
     sourceUrl: "https://www.hrblock.ca/support",
+    Message: faqMsg,
+    message: faqMsg,
   });
 });
 
