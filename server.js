@@ -84,6 +84,7 @@ app.post("/find-offices", async (req, res) => {
     totalFound: list.length,
     // Pre-built message — use {Message} in ix Hello Valid Result Template
     Message: spokenMessage,
+    SucessMessage: spokenMessage,
     message: spokenMessage,
     // Flat fields for ix Hello templates
     office1Name: o(0).name || "",
@@ -177,6 +178,7 @@ app.post("/get-availability", async (req, res) => {
       totalSlots: daySlots.length,
       // Pre-built message — use {Message} in ix Hello Valid Result Template
       Message: availMsg,
+      SucessMessage: availMsg,
       message: availMsg,
       // Flat slot fields
       slot1Time: s(0).Time || "",
@@ -329,6 +331,7 @@ app.post("/submit-booking", async (req, res) => {
       errorMessage: "",
       summaryText: summary,
       Message: summary,
+      SucessMessage: summary,
       message: summary,
     });
   } catch (err) {
@@ -371,6 +374,7 @@ app.post("/faq-search", async (req, res) => {
     answer: answerText,
     sourceUrl: "https://www.hrblock.ca/support",
     Message: faqMsg,
+    SucessMessage: faqMsg,
     message: faqMsg,
   });
 });
@@ -397,7 +401,7 @@ app.get("/debug-schedule", async (req, res) => {
   }
 });
 
-app.get("/health", (_, res) => res.json({ status: "ok", version: "6.0" }));
+app.get("/health", (_, res) => res.json({ status: "ok", version: "6.2" }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`HRB Middleware v6 running on port ${PORT}`));
