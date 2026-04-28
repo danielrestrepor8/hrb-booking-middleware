@@ -333,10 +333,10 @@ app.post("/submit-booking", async (req, res) => {
       );
       rawResponse = r.data;
       console.log("[submit-booking] status:", r.status, "data:", JSON.stringify(r.data));
-      confirmationId = r.data?.Id || r.data?.id || r.data?.BookingId ||
-        r.data?.bookingId || r.data?.ConfirmationNumber || r.data?.confirmationNumber ||
-        r.data?.AppointmentId || r.data?.appointmentId || r.data?.scheduleId ||
-        r.data?.ScheduleId || r.data?.confirmation;
+      // Real FlexBooker response shape: { ConfirmationGuid, Details: { Id, ... }, Error: null }
+      confirmationId = r.data?.ConfirmationGuid ||
+        r.data?.Details?.Id || r.data?.Details?.ConfirmationGuid ||
+        r.data?.Id || r.data?.id || r.data?.BookingId || r.data?.bookingId;
     } catch (bookingErr) {
       console.error("[submit-booking] error:", bookingErr.response?.status, JSON.stringify(bookingErr.response?.data));
       rawResponse = bookingErr.response?.data;
@@ -467,7 +467,7 @@ app.post("/debug-booking", async (req, res) => {
   res.json({ results });
 });
 
-app.get("/health", (_, res) => res.json({ status: "ok", version: "6.5" }));
+app.get("/health", (_, res) => res.json({ status: "ok", version: "6.6" }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`HRB Middleware v6 running on port ${PORT}`));
