@@ -288,33 +288,50 @@ app.post("/submit-booking", async (req, res) => {
 
     let confirmationId = null;
 
-    // Try /api/booking first
-    try {
-      const r = await axios.post(`${FB_BASE}/api/booking`, payload, {
-        headers: { ...BROWSER_HEADERS, "Content-Type": "application/json" },
+    // Real endpoint discovered via network capture: /api/scheduleBooking
+    const schedulePayload = {
+      HasUsedPurchasedPackage: false,
+      FirstName: firstName,
+      LastName: lastName,
+      Email: email,
+      Phone: phone,
+      Notes: "",
+      Cancelled: false,
+      NoShow: false,
+      NoShowCharged: false,
+      "ServiceGuids[]": "7a2d4eee-375c-4044-b72b-20a3e34c1d4c",
+      EmployeeGuid: scheduleId || "98290c82-ba2f-4670-9cf5-5ccc36b7c1de",
+      MadeByMerchant: false,
+      LocationId: locationId || "13370",
+      RemindByEmail: true,
+      RemindBySms: false,
+      RemindByPhone: false,
+      IsSeries: false,
+      Duration: 60,
+      TimeZone: TIMEZONE,
+      NumberOfSlots: 1,
+      SessionDateTime: slotDatetime,
+      RawQueryString: `?externalLocationId=${req.body.externalLocationId || "54215"}&Language=English`,
+      InlinePayment: false,
+      "DateTimes[]": slotDatetime,
+      WidgetGuid: WIDGET_ID,
+    };
+
+    const r = await axios.post(
+      `${FB_BASE}/api/scheduleBooking?merchantGuid=${MERCHANT_GUID}`,
+      new URLSearchParams(Object.entries(schedulePayload).map(([k,v]) => [k, String(v)])),
+      {
+        headers: {
+          ...BROWSER_HEADERS,
+          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+          "X-Requested-With": "XMLHttpRequest",
+        },
         timeout: 15000,
-      });
-      confirmationId = r.data?.BookingId || r.data?.bookingId || r.data?.ConfirmationNumber ||
-        r.data?.confirmationNumber || r.data?.Id || r.data?.id;
-    } catch (_) {
-      // Fallback to widget endpoint
-      const r2 = await axios.post(`${FB_BASE}/js/cm/html/widget/book`, {
-        merchantGuid: MERCHANT_GUID,
-        widgetUid: WIDGET_ID,
-        locationId,
-        serviceId,
-        appointmentDateTime: slotDatetime,
-        firstName, lastName, email, phone,
-        scheduleId: scheduleId || null,
-        employeeId: employeeId || null,
-        timeZone: TIMEZONE,
-      }, {
-        headers: { ...BROWSER_HEADERS, "Content-Type": "application/json" },
-        timeout: 15000,
-      });
-      confirmationId = r2.data?.bookingId || r2.data?.confirmationNumber ||
-        r2.data?.BookingId || r2.data?.ConfirmationNumber || r2.data?.id;
-    }
+      }
+    );
+    confirmationId = r.data?.Id || r.data?.id || r.data?.BookingId ||
+      r.data?.bookingId || r.data?.ConfirmationNumber || r.data?.confirmationNumber;
+    console.log("[submit-booking] scheduleBooking response:", r.status, JSON.stringify(r.data));
 
     if (!confirmationId) {
       return res.status(502).json({
@@ -401,7 +418,37 @@ app.get("/debug-schedule", async (req, res) => {
   }
 });
 
-app.get("/health", (_, res) => res.json({ status: "ok", version: "6.2" }));
+// ─── DEBUG — Test all booking endpoints ──────────────────────────────────────
+app.post("/debug-booking", async (req, res) => {
+  const payload = {
+    MerchantGuid: MERCHANT_GUID, WidgetUid: WIDGET_ID,
+    LocationId: req.body.locationId || "13370", ServiceId: SERVICE_ID,
+    AppointmentDateTime: req.body.slotDatetime || "5/1/2026 9:00 AM",
+    FirstName: "Test", LastName: "User",
+    Email: "test@test.com", Phone: "4165551234",
+    TimeZone: TIMEZONE, NumberOfAttendees: 1, ReminderPreference: "Email",
+  };
+  const endpoints = [
+    `${FB_BASE}/api/booking`,
+    `${FB_BASE}/api/appointments`,
+    `${FB_BASE}/js/cm/html/widget/book`,
+    `${FB_BASE}/api/widget/appointment`,
+  ];
+  const results = {};
+  for (let i = 0; i < endpoints.length; i++) {
+    try {
+      const r = await axios.post(endpoints[i], payload, {
+        headers: { ...BROWSER_HEADERS, "Content-Type": "application/json" }, timeout: 10000,
+      });
+      results["e"+(i+1)] = { url: endpoints[i], status: r.status, data: r.data };
+    } catch (e) {
+      results["e"+(i+1)] = { url: endpoints[i], err: e.message, status: e.response?.status, data: e.response?.data };
+    }
+  }
+  res.json({ results });
+});
+
+app.get("/health", (_, res) => res.json({ status: "ok", version: "6.4" }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`HRB Middleware v6 running on port ${PORT}`));
